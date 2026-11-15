@@ -15,8 +15,11 @@ const (
 	// The minimum time between two consecutive redraws.
 	redrawPause = 50 * time.Millisecond
 
-	// How long a key event's draw may be put off while more events wait.
+	// How long a key event's draw may be put off while more keys keep arriving.
 	maxKeyDrawDeferral = 50 * time.Millisecond
+
+	// How long a key event's draw waits for another key before it happens.
+	keyDrawGrace = 2 * time.Millisecond
 )
 
 // DoubleClickInterval specifies the maximum time between clicks to register a
@@ -391,28 +394,39 @@ func (a *Application) Run() error {
 		pasteBuffer strings.Builder
 		pasting     bool // Set to true while we receive paste key events.
 
-		// A key event's draw is skipped while more events wait in the queue,
+		// A key event's draw waits a moment for the next key,
 		// so a burst of keys costs one draw, not one each.
 		// Terminals send such bursts for mouse wheel scrolling when mouse reporting is off.
+		// An empty queue does not mean the burst is over:
+		// the screen cannot deliver input while it is being drawn,
+		// so right after a draw the rest of the burst is still on its way.
 		drawPending bool
 		lastKeyDraw time.Time
+		keyDraw     = time.NewTimer(time.Hour)
 	)
-	drawAfterKey := func() {
-		// handlers slower than the keys arrive would otherwise never let the queue drain
-		if len(a.events) > 0 && time.Since(lastKeyDraw) < maxKeyDrawDeferral {
-			drawPending = true
-			return
-		}
+	defer keyDraw.Stop()
+	drawForKeys := func() {
 		drawPending = false
 		a.draw()
 		lastKeyDraw = time.Now()
 	}
+	drawAfterKey := func() {
+		// keys that never pause, or handlers slower than the keys arrive, would otherwise never be drawn
+		if time.Since(lastKeyDraw) >= maxKeyDrawDeferral {
+			drawForKeys()
+			return
+		}
+		drawPending = true
+		keyDraw.Reset(keyDrawGrace)
+	}
 EventLoop:
 	for {
-		if drawPending && len(a.events) == 0 {
-			drawAfterKey()
-		}
 		select {
+		case <-keyDraw.C:
+			if drawPending {
+				drawForKeys()
+			}
+
 		// If we received an event, handle it.
 		case event := <-a.events:
 			if event == nil {
