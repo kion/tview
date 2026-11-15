@@ -14,6 +14,9 @@ const (
 
 	// The minimum time between two consecutive redraws.
 	redrawPause = 50 * time.Millisecond
+
+	// How long a key event's draw may be put off while more events wait.
+	maxKeyDrawDeferral = 50 * time.Millisecond
 )
 
 // DoubleClickInterval specifies the maximum time between clicks to register a
@@ -387,9 +390,28 @@ func (a *Application) Run() error {
 	var (
 		pasteBuffer strings.Builder
 		pasting     bool // Set to true while we receive paste key events.
+
+		// A key event's draw is skipped while more events wait in the queue,
+		// so a burst of keys costs one draw, not one each.
+		// Terminals send such bursts for mouse wheel scrolling when mouse reporting is off.
+		drawPending bool
+		lastKeyDraw time.Time
 	)
+	drawAfterKey := func() {
+		// handlers slower than the keys arrive would otherwise never let the queue drain
+		if len(a.events) > 0 && time.Since(lastKeyDraw) < maxKeyDrawDeferral {
+			drawPending = true
+			return
+		}
+		drawPending = false
+		a.draw()
+		lastKeyDraw = time.Now()
+	}
 EventLoop:
 	for {
+		if drawPending && len(a.events) == 0 {
+			drawAfterKey()
+		}
 		select {
 		// If we received an event, handle it.
 		case event := <-a.events:
@@ -423,7 +445,7 @@ EventLoop:
 				if inputCapture != nil {
 					event = inputCapture(event)
 					if event == nil {
-						a.draw()
+						drawAfterKey()
 						break // Don't forward event.
 					}
 					draw = true
@@ -447,7 +469,7 @@ EventLoop:
 
 				// Redraw.
 				if draw {
-					a.draw()
+					drawAfterKey()
 				}
 			case *tcell.EventPaste:
 				if !a.enablePaste {
